@@ -22,10 +22,10 @@ measure how much the output has updated towards the correct answer.
 - We can then iterate over many
     possible activations and look at how much they affect the corrupted run. If patching in an
     activation significantly increases the probability of the correct answer, this allows us to
-    localise which activations matter. 
+    localise which activations matter.
 - A key detail is that we move a single activation __from__ the clean run __to __the corrupted run.
     So if this changes the answer from incorrect to correct, we can be confident that the activation
-    moved was important. 
+    moved was important.
 
 Intuition:
 
@@ -278,6 +278,78 @@ def layer_head_vector_patch_setter(
     return corrupted_activation
 
 
+def layer_head_vector_patch_setter_gqa(
+    corrupted_activation,
+    index,
+    clean_activation,
+    n_heads: int,
+):
+    """
+    Applies the activation patch where index = [layer, head_index] for Grouped Query Attention models.
+
+    This handles the case where K/V heads are fewer than Q heads by mapping the query head index
+    to the appropriate K/V head index.
+
+    Args:
+        corrupted_activation: The corrupted K or V activation tensor
+        index: [layer, head_index] where head_index is in terms of query heads
+        clean_activation: The clean K or V activation tensor
+        n_heads: Total number of query heads in the model
+    """
+    assert len(index) == 2
+    layer, query_head_index = index
+
+    # Get the actual number of K/V heads from the tensor shape
+    n_kv_heads = corrupted_activation.shape[2]
+
+    # If this is not a GQA model (n_kv_heads == n_heads), fall back to regular patching
+    if n_kv_heads == n_heads:
+        corrupted_activation[:, :, query_head_index] = clean_activation[:, :, query_head_index]
+    else:
+        # Map query head index to K/V head index
+        heads_per_group = n_heads // n_kv_heads
+        kv_head_index = query_head_index // heads_per_group
+
+        # Only patch if the query head index maps to a valid K/V head
+        if kv_head_index < n_kv_heads:
+            corrupted_activation[:, :, kv_head_index] = clean_activation[:, :, kv_head_index]
+
+    return corrupted_activation
+
+
+def layer_pos_head_vector_patch_setter_gqa(
+    corrupted_activation,
+    index,
+    clean_activation,
+    n_heads: int,
+):
+    """
+    Applies the activation patch where index = [layer, pos, head_index] for Grouped Query Attention models.
+
+    This handles the case where K/V heads are fewer than Q heads by mapping the query head index
+    to the appropriate K/V head index.
+    """
+    assert len(index) == 3
+    layer, pos, query_head_index = index
+
+    # Get the actual number of K/V heads from the tensor shape
+    n_kv_heads = corrupted_activation.shape[2]
+
+    # If this is not a GQA model (n_kv_heads == n_heads), fall back to regular patching
+    if n_kv_heads == n_heads:
+        corrupted_activation[:, pos, query_head_index] = clean_activation[:, pos, query_head_index]
+    else:
+        # Map query head index to K/V head index
+        heads_per_group = n_heads // n_kv_heads
+        kv_head_index = query_head_index // heads_per_group
+
+        # Only patch if the query head index maps to a valid K/V head
+        if kv_head_index < n_kv_heads:
+            corrupted_activation[:, pos, kv_head_index] = clean_activation[:, pos, kv_head_index]
+
+    return corrupted_activation
+
+
 def layer_head_pattern_patch_setter(
     corrupted_activation,
     index,
@@ -342,7 +414,7 @@ get_act_patch_resid_pre = partial(
 get_act_patch_resid_pre.__doc__ = """
     Function to get activation patching results for the residual stream (at the start of each block) (by position). Returns a tensor of shape [n_layers, pos]
 
-    See generic_activation_patch for a more detailed explanation of activation patching 
+    See generic_activation_patch for a more detailed explanation of activation patching
 
     Args:
         model: The relevant model
@@ -363,7 +435,7 @@ get_act_patch_resid_mid = partial(
 get_act_patch_resid_mid.__doc__ = """
     Function to get activation patching results for the residual stream (between the attn and MLP layer of each block) (by position). Returns a tensor of shape [n_layers, pos]
 
-    See generic_activation_patch for a more detailed explanation of activation patching 
+    See generic_activation_patch for a more detailed explanation of activation patching
 
     Args:
         model: The relevant model
@@ -384,7 +456,7 @@ get_act_patch_attn_out = partial(
 get_act_patch_attn_out.__doc__ = """
     Function to get activation patching results for the output of each Attention layer (by position). Returns a tensor of shape [n_layers, pos]
 
-    See generic_activation_patch for a more detailed explanation of activation patching 
+    See generic_activation_patch for a more detailed explanation of activation patching
 
     Args:
         model: The relevant model
@@ -405,7 +477,7 @@ get_act_patch_mlp_out = partial(
 get_act_patch_mlp_out.__doc__ = """
     Function to get activation patching results for the output of each MLP layer (by position). Returns a tensor of shape [n_layers, pos]
 
-    See generic_activation_patch for a more detailed explanation of activation patching 
+    See generic_activation_patch for a more detailed explanation of activation patching
 
     Args:
         model: The relevant model
@@ -426,7 +498,7 @@ get_act_patch_attn_head_out_by_pos = partial(
 get_act_patch_attn_head_out_by_pos.__doc__ = """
     Function to get activation patching results for the output of each Attention Head (by position). Returns a tensor of shape [n_layers, pos, n_heads]
 
-    See generic_activation_patch for a more detailed explanation of activation patching 
+    See generic_activation_patch for a more detailed explanation of activation patching
 
     Args:
         model: The relevant model
@@ -447,7 +519,7 @@ get_act_patch_attn_head_q_by_pos = partial(
 get_act_patch_attn_head_q_by_pos.__doc__ = """
     Function to get activation patching results for the queries of each Attention Head (by position). Returns a tensor of shape [n_layers, pos, n_heads]
 
-    See generic_activation_patch for a more detailed explanation of activation patching 
+    See generic_activation_patch for a more detailed explanation of activation patching
 
     Args:
         model: The relevant model
@@ -459,16 +531,18 @@ get_act_patch_attn_head_q_by_pos.__doc__ = """
         patched_output (torch.Tensor): The tensor of the patching metric for each patch. Has shape [n_layers, pos, n_heads]
     """
 
-get_act_patch_attn_head_k_by_pos = partial(
-    generic_activation_patch,
-    patch_setter=layer_pos_head_vector_patch_setter,
-    activation_name="k",
-    index_axis_names=("layer", "pos", "head"),
-)
-get_act_patch_attn_head_k_by_pos.__doc__ = """
-    Function to get activation patching results for the keys of each Attention Head (by position). Returns a tensor of shape [n_layers, pos, n_heads]
 
-    See generic_activation_patch for a more detailed explanation of activation patching 
+def get_act_patch_attn_head_k_by_pos(
+    model: HookedTransformer,
+    corrupted_tokens: Int[torch.Tensor, "batch pos"],
+    clean_cache: ActivationCache,
+    patching_metric: Callable[[Float[torch.Tensor, "batch pos d_vocab"]], Float[torch.Tensor, ""]],
+) -> torch.Tensor:
+    """
+    Function to get activation patching results for the keys of each Attention Head (by position).
+    Returns a tensor of shape [n_layers, pos, n_heads]. Handles GQA models automatically.
+
+    See generic_activation_patch for a more detailed explanation of activation patching
 
     Args:
         model: The relevant model
@@ -479,17 +553,29 @@ get_act_patch_attn_head_k_by_pos.__doc__ = """
     Returns:
         patched_output (torch.Tensor): The tensor of the patching metric for each patch. Has shape [n_layers, pos, n_heads]
     """
+    patch_setter = partial(layer_pos_head_vector_patch_setter_gqa, n_heads=model.cfg.n_heads)
+    return generic_activation_patch(
+        model,
+        corrupted_tokens,
+        clean_cache,
+        patching_metric,
+        patch_setter,
+        activation_name="k",
+        index_axis_names=("layer", "pos", "head"),
+    )
 
-get_act_patch_attn_head_v_by_pos = partial(
-    generic_activation_patch,
-    patch_setter=layer_pos_head_vector_patch_setter,
-    activation_name="v",
-    index_axis_names=("layer", "pos", "head"),
-)
-get_act_patch_attn_head_v_by_pos.__doc__ = """
-    Function to get activation patching results for the values of each Attention Head (by position). Returns a tensor of shape [n_layers, pos, n_heads]
 
-    See generic_activation_patch for a more detailed explanation of activation patching 
+def get_act_patch_attn_head_v_by_pos(
+    model: HookedTransformer,
+    corrupted_tokens: Int[torch.Tensor, "batch pos"],
+    clean_cache: ActivationCache,
+    patching_metric: Callable[[Float[torch.Tensor, "batch pos d_vocab"]], Float[torch.Tensor, ""]],
+) -> torch.Tensor:
+    """
+    Function to get activation patching results for the values of each Attention Head (by position).
+    Returns a tensor of shape [n_layers, pos, n_heads]. Handles GQA models automatically.
+
+    See generic_activation_patch for a more detailed explanation of activation patching
 
     Args:
         model: The relevant model
@@ -500,6 +586,18 @@ get_act_patch_attn_head_v_by_pos.__doc__ = """
     Returns:
         patched_output (torch.Tensor): The tensor of the patching metric for each patch. Has shape [n_layers, pos, n_heads]
     """
+    patch_setter = partial(layer_pos_head_vector_patch_setter_gqa, n_heads=model.cfg.n_heads)
+    return generic_activation_patch(
+        model,
+        corrupted_tokens,
+        clean_cache,
+        patching_metric,
+        patch_setter,
+        activation_name="v",
+        index_axis_names=("layer", "pos", "head"),
+    )
+
+
 # %%
 get_act_patch_attn_head_pattern_by_pos = partial(
     generic_activation_patch,
@@ -510,7 +608,7 @@ get_act_patch_attn_head_pattern_by_pos = partial(
 get_act_patch_attn_head_pattern_by_pos.__doc__ = """
     Function to get activation patching results for the attention pattern of each Attention Head (by destination position). Returns a tensor of shape [n_layers, n_heads, dest_pos]
 
-    See generic_activation_patch for a more detailed explanation of activation patching 
+    See generic_activation_patch for a more detailed explanation of activation patching
 
     Args:
         model: The relevant model
@@ -531,7 +629,7 @@ get_act_patch_attn_head_pattern_dest_src_pos = partial(
 get_act_patch_attn_head_pattern_dest_src_pos.__doc__ = """
     Function to get activation patching results for each destination, source entry of the attention pattern for each Attention Head. Returns a tensor of shape [n_layers, n_heads, dest_pos, src_pos]
 
-    See generic_activation_patch for a more detailed explanation of activation patching 
+    See generic_activation_patch for a more detailed explanation of activation patching
 
     Args:
         model: The relevant model
@@ -553,7 +651,7 @@ get_act_patch_attn_head_out_all_pos = partial(
 get_act_patch_attn_head_out_all_pos.__doc__ = """
     Function to get activation patching results for the outputs of each Attention Head (across all positions). Returns a tensor of shape [n_layers, n_heads]
 
-    See generic_activation_patch for a more detailed explanation of activation patching 
+    See generic_activation_patch for a more detailed explanation of activation patching
 
     Args:
         model: The relevant model
@@ -574,7 +672,7 @@ get_act_patch_attn_head_q_all_pos = partial(
 get_act_patch_attn_head_q_all_pos.__doc__ = """
     Function to get activation patching results for the queries of each Attention Head (across all positions). Returns a tensor of shape [n_layers, n_heads]
 
-    See generic_activation_patch for a more detailed explanation of activation patching 
+    See generic_activation_patch for a more detailed explanation of activation patching
 
     Args:
         model: The relevant model
@@ -586,16 +684,18 @@ get_act_patch_attn_head_q_all_pos.__doc__ = """
         patched_output (torch.Tensor): The tensor of the patching metric for each patch. Has shape [n_layers, n_heads]
     """
 
-get_act_patch_attn_head_k_all_pos = partial(
-    generic_activation_patch,
-    patch_setter=layer_head_vector_patch_setter,
-    activation_name="k",
-    index_axis_names=("layer", "head"),
-)
-get_act_patch_attn_head_k_all_pos.__doc__ = """
-    Function to get activation patching results for the keys of each Attention Head (across all positions). Returns a tensor of shape [n_layers, n_heads]
 
-    See generic_activation_patch for a more detailed explanation of activation patching 
+def get_act_patch_attn_head_k_all_pos(
+    model: HookedTransformer,
+    corrupted_tokens: Int[torch.Tensor, "batch pos"],
+    clean_cache: ActivationCache,
+    patching_metric: Callable[[Float[torch.Tensor, "batch pos d_vocab"]], Float[torch.Tensor, ""]],
+) -> torch.Tensor:
+    """
+    Function to get activation patching results for the keys of each Attention Head (across all positions).
+    Returns a tensor of shape [n_layers, n_heads]. Handles GQA models automatically.
+
+    See generic_activation_patch for a more detailed explanation of activation patching
 
     Args:
         model: The relevant model
@@ -606,17 +706,29 @@ get_act_patch_attn_head_k_all_pos.__doc__ = """
     Returns:
         patched_output (torch.Tensor): The tensor of the patching metric for each patch. Has shape [n_layers, n_heads]
     """
+    patch_setter = partial(layer_head_vector_patch_setter_gqa, n_heads=model.cfg.n_heads)
+    return generic_activation_patch(
+        model,
+        corrupted_tokens,
+        clean_cache,
+        patching_metric,
+        patch_setter,
+        activation_name="k",
+        index_axis_names=("layer", "head"),
+    )
 
-get_act_patch_attn_head_v_all_pos = partial(
-    generic_activation_patch,
-    patch_setter=layer_head_vector_patch_setter,
-    activation_name="v",
-    index_axis_names=("layer", "head"),
-)
-get_act_patch_attn_head_v_all_pos.__doc__ = """
-    Function to get activation patching results for the values of each Attention Head (across all positions). Returns a tensor of shape [n_layers, n_heads]
 
-    See generic_activation_patch for a more detailed explanation of activation patching 
+def get_act_patch_attn_head_v_all_pos(
+    model: HookedTransformer,
+    corrupted_tokens: Int[torch.Tensor, "batch pos"],
+    clean_cache: ActivationCache,
+    patching_metric: Callable[[Float[torch.Tensor, "batch pos d_vocab"]], Float[torch.Tensor, ""]],
+) -> torch.Tensor:
+    """
+    Function to get activation patching results for the values of each Attention Head (across all positions).
+    Returns a tensor of shape [n_layers, n_heads]. Handles GQA models automatically.
+
+    See generic_activation_patch for a more detailed explanation of activation patching
 
     Args:
         model: The relevant model
@@ -627,6 +739,17 @@ get_act_patch_attn_head_v_all_pos.__doc__ = """
     Returns:
         patched_output (torch.Tensor): The tensor of the patching metric for each patch. Has shape [n_layers, n_heads]
     """
+    patch_setter = partial(layer_head_vector_patch_setter_gqa, n_heads=model.cfg.n_heads)
+    return generic_activation_patch(
+        model,
+        corrupted_tokens,
+        clean_cache,
+        patching_metric,
+        patch_setter,
+        activation_name="v",
+        index_axis_names=("layer", "head"),
+    )
+
 
 get_act_patch_attn_head_pattern_all_pos = partial(
     generic_activation_patch,
@@ -637,7 +760,7 @@ get_act_patch_attn_head_pattern_all_pos = partial(
 get_act_patch_attn_head_pattern_all_pos.__doc__ = """
     Function to get activation patching results for the attention pattern of each Attention Head (across all positions). Returns a tensor of shape [n_layers, n_heads]
 
-    See generic_activation_patch for a more detailed explanation of activation patching 
+    See generic_activation_patch for a more detailed explanation of activation patching
 
     Args:
         model: The relevant model
